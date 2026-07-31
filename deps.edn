@@ -1,0 +1,15 @@
+{:paths ["src"]
+ ;; Zero deps. These are frame codecs and state machines; the socket, the
+ ;; crypto (kotoba-lang/noise) and the addresses (multiformats.multiaddr) all
+ ;; live outside, which is what makes a three-layer negotiation testable in
+ ;; memory.
+ :deps {}
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]
+         :exec-fn cognitect.test-runner.api/test}
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
+                     "--fail-level" "error"]}}}
