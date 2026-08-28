@@ -31,12 +31,34 @@
   After acceptance, EVERY plaintext octet is inside a Yamux frame — including
   the per-stream multistream negotiation for whatever protocol a stream
   carries. `step-until!` adds the frame-dispatch layer: decode one Yamux frame
-  off `plain-buf`, route it (ping→ack, go-away, reset an unrecognised inbound
-  SYN, or append DATA to the owning stream's own buffer), and only fall back to
-  decrypting another Noise frame once `plain-buf` holds no complete frame.
-  Using the framed poller before the muxer exists would try to parse a
-  multistream string's length-prefix byte as a Yamux version octet and fail
-  the connection on the first read."
+  off `plain-buf`, route it (ping→ack, go-away, reset-or-accept an
+  unrecognised inbound SYN depending on `:accept-protocols`, or append DATA to
+  the owning stream's own buffer), and only fall back to decrypting another
+  Noise frame once `plain-buf` holds no complete frame. Using the framed
+  poller before the muxer exists would try to parse a multistream string's
+  length-prefix byte as a Yamux version octet and fail the connection on the
+  first read.
+
+  ## A request/response protocol is not necessarily one stream
+
+  `negotiate-protocol!` + `write-length-prefixed!` + `read-length-prefixed!`
+  on the SAME stream id this side opened is correct for protocols where the
+  peer replies on the stream it was asked on (`/ipfs/id/1.0.0`, `/ipfs/kad/1.0.0`).
+  It is NOT correct for Bitswap: go-bitswap's network layer opens a FRESH
+  stream toward the peer for every Message it sends — including the reply to
+  a want — rather than writing back on the stream the want arrived on.
+  Measured against a real Kubo peer (both a local test node and public
+  network peers): our want-block negotiates `/ipfs/bitswap/1.2.0` and is
+  written on our stream cleanly, and Kubo answers by opening a NEW
+  even-numbered stream carrying its own multistream proposal + a
+  length-prefixed `Message`. A client that only reads the stream it dialed
+  waits out its timeout with the answer sitting unread in a stream it never
+  looked at — and, before this was fixed, a client whose default policy was
+  to Yamux-RESET every inbound SYN it did not recognise destroyed that answer
+  before it could even be buffered. `accept-protocols` opts a connection
+  into NOT doing that for named protocols, and `accept-stream!` runs the
+  listener half of multistream on whichever inbound stream arrives so a
+  caller can read it like any other."
   (:require [clojure.string :as str]
             ["@noble/curves/ed25519.js" :refer [ed25519]]
             [libp2p.multistream :as ms]
@@ -103,13 +125,22 @@
 
 ;; ── connection context ──────────────────────────────────────────────────────
 
-(defn- session-ctx [conn role]
+(defn- session-ctx [conn role accept-protocols]
   {:conn conn
    :send-cs (atom nil)
    :recv-cs (atom nil)
    :plain-buf (atom [])
    :session (atom (yamux/session role))
    :streams (atom {})               ; stream-id -> plaintext buffer atom
+   ;; Protocols this side will accept on a stream THE PEER opens toward us.
+   ;; Empty by default: a stream nobody claims is refused, same as before this
+   ;; was added. Non-empty is an explicit opt-in that changes what an
+   ;; unrecognised inbound SYN means — see `dispatch-one-yamux-frame!`.
+   :accept-protocols (set accept-protocols)
+   ;; Peer-opened stream ids that arrived with a SYN and have not yet been
+   ;; claimed by `accept-stream!` — a queue, not a set, so two streams opened
+   ;; back-to-back are offered in the order they arrived.
+   :pending (atom [])
    :closed? (atom false)})
 
 (defn secure-write!
@@ -214,10 +245,25 @@
         ;; silently unroutable rather than politely refused. Measured against
         ;; a real Kubo peer: it opened two such streams toward us — presumably
         ;; its own identify/push — as WINDOW_UPDATE SYNs.
+        ;;
+        ;; What happens to that SYN depends on `:accept-protocols`. Empty
+        ;; (the default) is the original behaviour: reset it immediately,
+        ;; refusing every peer-initiated stream. Non-empty means the caller
+        ;; is expecting some protocol to talk back to us on a stream IT
+        ;; opens — Bitswap does exactly this (see the namespace docstring) —
+        ;; so instead of resetting we register a buffer and queue the id for
+        ;; `accept-stream!`. A stream nobody ever calls `accept-stream!` for
+        ;; is not reset here; it accumulates unread bytes until the whole
+        ;; connection closes. That is a deliberate, narrow trade (bounded by
+        ;; how many streams a single short-lived diagnostic/fetch connection
+        ;; sees) rather than an attempt to be a general-purpose responder.
         (and (contains? flags :syn) (not (contains? @(:streams ctx) stream-id)))
-        (let [{:keys [session out]} (yamux/reset-stream @(:session ctx) stream-id)]
-          (reset! (:session ctx) session)
-          (secure-write! ctx out))
+        (if (seq (:accept-protocols ctx))
+          (do (swap! (:streams ctx) assoc stream-id (atom (vec (:payload frame))))
+              (swap! (:pending ctx) conj stream-id))
+          (let [{:keys [session out]} (yamux/reset-stream @(:session ctx) stream-id)]
+            (reset! (:session ctx) session)
+            (secure-write! ctx out)))
 
         (and (= :data type) (contains? @(:streams ctx) stream-id))
         (swap! (get @(:streams ctx) stream-id) into (:payload frame))
@@ -256,10 +302,16 @@
   frame predicates and payload/parsing functions octet-for-octet), and return
   a Promise of a `ctx` whose `send-cs`/`recv-cs` are seeded from the completed
   handshake's split `CipherState`s. Does NOT close the socket — unlike
-  `node/dial!`, which is a one-shot measurement."
-  [{:keys [host port timeout-ms noise-suite] :or {timeout-ms 25000}}]
+  `node/dial!`, which is a one-shot measurement.
+
+  `:accept-protocols` (default none) opts the connection into NOT
+  Yamux-resetting inbound SYNs — see the namespace docstring and
+  `accept-stream!`. Pass the protocol ids you expect the peer to open a
+  stream FOR (informational only here; `accept-stream!` is what actually
+  restricts which protocol ids it will negotiate)."
+  [{:keys [host port timeout-ms noise-suite accept-protocols] :or {timeout-ms 25000}}]
   (let [conn (node/connect! host port)
-        ctx (session-ctx conn :dialer)
+        ctx (session-ctx conn :dialer accept-protocols)
         st noise-suite
         stat (noise/keypair st)]
     (-> (js/Promise.resolve)
@@ -340,6 +392,76 @@
                                                        failed " " detail)))
                                :else (recv-loop dialer)))))))]
       (recv-loop dialer))))
+
+(def ^:const accept-stream-candidate-cap-ms
+  "Per-candidate cap inside `accept-stream!`. A peer opens streams toward us
+  for reasons that have nothing to do with what we are waiting for — identify
+  push is the one measured against a real Kubo peer — and multistream gives
+  us no positive signal that one of those is going nowhere: we answer its
+  proposal `na`, and if the peer had nothing else to offer it simply stops
+  writing (there is no per-stream close notification this pump acts on, only
+  whole-connection go-away). Capping how long ONE candidate gets before we
+  move to the next is what keeps a decoy stream from consuming the entire
+  `accept-stream!` budget and starving the actual answer arriving on a later
+  stream — id 4 arrived strictly after id 2 in the measurement that motivated
+  this (identify-push, then the real Bitswap reply)."
+  4000)
+
+(defn accept-stream!
+  "Wait for the peer to open a stream toward us and run the LISTENER half of
+  multistream-select on it, accepting any of `supported`. Returns a Promise
+  of `{:stream-id id :protocol proto}`.
+
+  Tries pending streams IN ARRIVAL ORDER, each capped at
+  `accept-stream-candidate-cap-ms` (not the full `timeout-ms`) — a stream
+  that never resolves to one of `supported` is skipped rather than failing
+  the whole call, so a decoy stream opened before the one we actually want
+  cannot exhaust the budget by itself. Overall elapsed time is still bounded
+  by `timeout-ms` across every candidate and every wait for a new one to
+  arrive.
+
+  Only ever resolves for a connection made with a non-empty
+  `:accept-protocols` at `connect-and-secure!` time — with the default empty
+  set every inbound SYN is reset before it reaches `:pending`, so this would
+  wait out `timeout-ms` and fail every time, which is the point: opting in is
+  explicit, not inferred from calling this.
+
+  Symmetric to `negotiate-protocol!` (the dialer half, on a stream WE
+  opened) — this is for protocols where the peer answers by opening a
+  stream of its OWN, which is how go-bitswap replies to a want (see the
+  namespace docstring's '## A request/response protocol is not necessarily
+  one stream')."
+  [ctx supported timeout-ms]
+  (let [deadline (+ (js/Date.now) timeout-ms)]
+    (letfn [(remaining [] (max 0 (- deadline (js/Date.now))))
+            (give-up! [] (js/Promise.reject (js/Error. (str "accept-stream: timeout after " timeout-ms "ms"))))
+            (try-next []
+              (if (zero? (remaining))
+                (give-up!)
+                (-> (step-until! ctx #(seq @(:pending ctx)) (remaining) "accept-stream-wait")
+                    (.then (fn [_]
+                             (let [stream-id (first @(:pending ctx))]
+                               (swap! (:pending ctx) subvec 1)
+                               (negotiate-candidate stream-id)))))))
+            (negotiate-candidate [stream-id]
+              (let [buf (get @(:streams ctx) stream-id)
+                    cap (min accept-stream-candidate-cap-ms (remaining))]
+                (letfn [(recv-loop [l]
+                          (-> (step-until! ctx #((node/take-ms-message! buf) @buf) cap
+                                           (str "ms-accept-" stream-id))
+                              (.then (fn [msg]
+                                       (let [{:keys [listener out done failed]} (ms/listener-recv l msg)]
+                                         (when out (secure-write! ctx (yamux/data-frame stream-id #{} out)))
+                                         (cond
+                                           done (js/Promise.resolve {:stream-id stream-id :protocol done})
+                                           failed (try-next)
+                                           :else (recv-loop listener)))))
+                              ;; Candidate stream never sent another message before its cap —
+                              ;; almost certainly not going to. Try the next one instead of
+                              ;; propagating this as the whole call's failure.
+                              (.catch (fn [_e] (try-next)))))]
+                  (recv-loop (ms/listener supported)))))]
+      (try-next))))
 
 (defn write-length-prefixed!
   "Write OCTETS on STREAM-ID as one varint-length-prefixed message — the

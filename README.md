@@ -72,6 +72,29 @@ never returns credit stalls the stream at exactly that many octets and looks
 like a hung peer. Credit is returned **lazily**, below half a window — one
 update per packet would be its own flood.
 
+## A reply is not always on the stream you opened
+
+`libp2p.provider.node-muxed` (the async Node driver over this repo's pure
+codecs) originally reset any inbound Yamux SYN it did not itself open —
+correct for protocols where the peer answers on the stream you dialed
+(identify, Kademlia), and silently wrong for one that does not: **go-bitswap
+answers a want by opening a NEW stream toward you and writing its `Message`
+there**, never on the stream your want arrived on. A dialer that only reads
+back the stream it opened, and resets everything else, negotiates
+`/ipfs/bitswap/1.2.0` cleanly, sends a well-formed want-block, and then times
+out — having reset the very stream carrying the answer before ever reading
+it. Measured against both a local Kubo node and several public-network peers:
+this was the entire cause of "negotiates fine, never answers", not a wire
+encoding bug.
+
+`connect-and-secure!` now takes an `:accept-protocols` opt-in (default empty,
+preserving the old reset-everything behaviour) and `accept-stream!` runs the
+LISTENER half of multistream-select on whichever inbound stream the peer
+opens, so a caller can read a reply that arrives on a stream it did not
+dial. It tries pending streams in arrival order, capping each candidate
+rather than the whole call, because a peer may open unrelated streams first
+(identify-push, measured) that never resolve to a protocol you asked for.
+
 ## Usage
 
 ```clojure
