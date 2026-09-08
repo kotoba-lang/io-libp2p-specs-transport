@@ -59,7 +59,7 @@
   into NOT doing that for named protocols, and `accept-stream!` runs the
   listener half of multistream on whichever inbound stream arrives so a
   caller can read it like any other."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             ["@noble/curves/ed25519.js" :refer [ed25519]]
             [libp2p.multistream :as ms]
             [libp2p.provider.node :as node]

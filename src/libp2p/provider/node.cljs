@@ -36,7 +36,7 @@
       ;; => Promise of {:done? true :remote-static-len 32 :remote-identity {…}}"
   (:require ["net" :as net]
             ["@noble/curves/ed25519.js" :refer [ed25519]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [libp2p.multistream :as ms]
             [noise.core :as noise]
             [noise.provider.noble :as noble]
