@@ -35,7 +35,7 @@
 
   Pure: frames in and out as octet vectors, and a session that is a value.
   Whoever owns the socket does the reading and writing."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def ^:const version 0)
 (def ^:const header-size 12)

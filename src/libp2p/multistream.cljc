@@ -36,7 +36,7 @@
 
   Pure: this namespace frames and interprets messages. Whoever owns the socket
   feeds it octets and writes what it returns."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def ^:const protocol-id "/multistream/1.0.0")
 (def ^:const na "na")
