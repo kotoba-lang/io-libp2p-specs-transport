@@ -4,7 +4,7 @@
   Usage:
 
       nbb --classpath 'src:../noise/src:../bytes/src:../dev-protobuf/src:script'
-          script/dial.cljs <host> <port>
+          script/dial.cljk <host> <port>
 
   The classpath needs this repo, `kotoba-lang/noise`, `kotoba-lang/bytes` and
   `kotoba-lang/dev-protobuf`, plus `@noble/*` resolvable from node.
