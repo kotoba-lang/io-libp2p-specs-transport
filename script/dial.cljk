@@ -3,7 +3,7 @@
 
   Usage:
 
-      nbb --classpath 'src:../noise/src:../bytes/src:../dev-protobuf/src:script'
+      kbb --backend sci --classpath 'src:../noise/src:../bytes/src:../dev-protobuf/src:script'
           script/dial.cljk <host> <port>
 
   The classpath needs this repo, `kotoba-lang/noise`, `kotoba-lang/bytes` and

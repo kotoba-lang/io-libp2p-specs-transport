@@ -130,7 +130,7 @@ maps, and the caller owns the socket.
 ## Test
 
 ```
-clojure -M:test
+kbb -M:test
 ```
 
 25 tests / 119 assertions.
