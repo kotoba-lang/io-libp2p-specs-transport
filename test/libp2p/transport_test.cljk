@@ -1,5 +1,5 @@
 (ns libp2p.transport-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [libp2p.multistream :as ms]
             [libp2p.yamux :as y]))
 
